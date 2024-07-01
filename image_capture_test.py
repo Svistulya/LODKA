@@ -1,17 +1,20 @@
 import cv2
 import numpy as np
-import RPi.GPIO as GPIO
+import GPIO as GPIO
 import threading
 import time
+import sys
+from PyQt5 import QtCore, QtGui, QtWidgets
+from ui_cheta import Ui_MainWindow
 
 # Параметры ПД-регулятора
 Kp = 0.5
 Kd = 0.1
 
 # Параметры базовой скорости и сопротивления воды
-base_speed = 25
+base_speed = 60
 
-# Предыдущая ошибка для вычисления производной
+# Предыдущая ошибка для вычисления производнойы
 prev_error_x = 0
 prev_error_y = 0
 
@@ -22,6 +25,13 @@ GPIO.setwarnings(False)
 # Пины для ШИМ сигнала
 left_motor_pin = 17
 right_motor_pin = 18
+
+# ЭхоЛокатор
+GPIO.setmode(GPIO.BCM)
+TRIG = 23
+ECHO = 24
+GPIO.setup(TRIG, GPIO.OUT)
+GPIO.setup(ECHO, GPIO.IN)
 
 # Частота ШИМ сигнала
 pwm_freq = 1000  # 1 kHz
@@ -121,16 +131,15 @@ def stop_motors():
     left_motor_pwm.ChangeDutyCycle(0)
     right_motor_pwm.ChangeDutyCycle(0)
 
-def move_forward(sex): #Движение вперед в теяении определенного времени
+def move_forward(sex): #Движение вперед в течении определенного времени
 
-    timeout = time.time() + sex  # таймер на 3 секунды
+    timeout = time.time() + sex  # таймер на sex секунд
     while True:
         left_motor_pwm.ChangeDutyCycle(50)
         right_motor_pwm.ChangeDutyCycle(50)
         if time.time() > timeout:
             break
-    left_motor_pwm.ChangeDutyCycle(0)
-    right_motor_pwm.ChangeDutyCycle(0)
+    stop_motors()
 
 def process_frame(frame):
     # Фильтрация шума
@@ -214,10 +223,30 @@ def process_frame(frame):
     return frame
 
 
-def get_distance_to_buoy(center):
-    # Здесь нужно использовать данные с датчика для определения расстояния до буйка
-    # В данном примере функция возвращает фиктивное значение
-    return 30  # например, 25 см
+def get_distance_to_buoy(center): # Надо добавить локатор
+    # Убедитесь, что триггерный пин низкий
+    GPIO.output(TRIG, False)
+
+    # Отправка ультразвукового импульса
+    GPIO.output(TRIG, True)
+    time.sleep(0.00001)
+    GPIO.output(TRIG, False)
+
+    # Измерение времени приема импульса
+    while GPIO.input(ECHO) == 0:
+        pulse_start = time.time()
+
+    while GPIO.input(ECHO) == 1:
+        pulse_end = time.time()
+
+    # Вычисление длительности импульса
+    pulse_duration = pulse_end - pulse_start
+
+    # Вычисление расстояния
+    distance = pulse_duration * 17150  # Расстояние в сантиметрах
+    distance = round(distance, 2)
+
+    return distance
 
 
 def rotate_around_buoy(center):
@@ -256,7 +285,7 @@ def turn_right_90():
 
 
 def move_square():
-    print("HUETA")
+    print("Square")
     turn_right_90()
     move_forward(1)
     turn_right_90()
@@ -268,6 +297,18 @@ def move_square():
     turn_right_90()
     move_forward(1)
     turn_right_90()
+
+def move_in_circle(radius):  # Или этот или 1 вариант с квадратом
+    wheel_distance = 0.1  # Расстояние между колесами (метры)
+    left_speed = base_speed * (radius - wheel_distance) / radius
+    right_speed = base_speed * (radius + wheel_distance) / radius
+
+    left_motor_pwm(left_speed)
+    right_motor_pwm(right_speed)
+
+    time.sleep(10)
+
+    stop_motors()
 
 def is_buoy_on_right(center):
     # Проверяем, находится ли центр желтого буя справа от центра изображения
@@ -340,3 +381,44 @@ except KeyboardInterrupt:
     stop_motors()
     GPIO.cleanup()
     print("Программа завершена")
+
+class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow): #Запускает главное окно приложения.
+    def __init__(self):
+        super().__init__()
+        self.setupUi(self)
+
+        self.StartBut.clicked.connect(self.on_StartBut_clicked)
+        self.StopBut.clicked.connect(self.on_StopBut_clicked)
+
+        # Настройка таймера для обновления изображения с камеры
+        self.timer = QtCore.QTimer(self)
+        self.timer.timeout.connect(self.update_frame)
+        self.cap = cv2.VideoCapture(0)  # Использование первой камеры
+        self.timer.start(20)
+
+    def on_StartBut_clicked(self):
+        print("Start")
+
+    def on_StopBut_clicked(self):
+        print("Stop")
+
+    def update_frame(self):
+        ret, frame = self.cap.read()
+        if ret:
+            # Преобразование изображения из BGR (по умолчанию в OpenCV) в RGB
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            height, width, channel = frame.shape
+            step = channel * width
+            qImg = QtGui.QImage(frame.data, width, height, step, QtGui.QImage.Format_RGB888)
+            self.label.setPixmap(QtGui.QPixmap.fromImage(qImg))
+
+    def closeEvent(self, event):
+        # Освобождение ресурсов при закрытии приложения
+        self.cap.release()
+        event.accept()
+
+if __name__ == '__main__':
+    app = QtWidgets.QApplication(sys.argv)
+    mainWindow = MainWindow()
+    mainWindow.show()
+    sys.exit(app.exec_())
